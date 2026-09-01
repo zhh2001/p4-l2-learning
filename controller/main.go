@@ -24,15 +24,18 @@ type options struct {
 	p4infoPath       string
 	deviceConfigPath string
 	verifyOnly       bool
+	expectedMAC      *learnSample
 }
 
 func parseOptions(args []string) (options, error) {
 	var cfg options
+	var expectedMAC string
+	var expectedPort uint
 	flags := flag.NewFlagSet("learning-controller", flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
 	flags.StringVar(&cfg.address, "address", "127.0.0.1:50052", "P4Runtime address")
 	flags.Uint64Var(&cfg.deviceID, "device-id", 2, "P4Runtime device ID")
-	flags.Uint64Var(&cfg.electionID, "election-id", 1, "P4Runtime election ID")
+	flags.Uint64Var(&cfg.electionID, "election-id", 2, "P4Runtime election ID")
 	flags.StringVar(
 		&cfg.p4infoPath,
 		"p4info",
@@ -46,12 +49,20 @@ func parseOptions(args []string) (options, error) {
 		"BMv2 JSON configuration",
 	)
 	flags.BoolVar(&cfg.verifyOnly, "verify-only", false, "verify static state and exit")
+	flags.StringVar(&expectedMAC, "expect-mac", "", "learned source MAC to verify")
+	flags.UintVar(&expectedPort, "expect-port", 0, "expected learned bridge port")
 	if err := flags.Parse(args); err != nil {
 		return options{}, err
 	}
 	if flags.NArg() != 0 {
 		return options{}, fmt.Errorf("unexpected arguments: %v", flags.Args())
 	}
+	electionIDSet := false
+	flags.Visit(func(option *flag.Flag) {
+		if option.Name == "election-id" {
+			electionIDSet = true
+		}
+	})
 	if cfg.address == "" {
 		return options{}, errors.New("P4Runtime address must not be empty")
 	}
@@ -60,6 +71,29 @@ func parseOptions(args []string) (options, error) {
 	}
 	if cfg.electionID == 0 {
 		return options{}, errors.New("election ID must be non-zero")
+	}
+	if (expectedMAC == "") != (expectedPort == 0) {
+		return options{}, errors.New("expect-mac and expect-port must be used together")
+	}
+	if expectedMAC != "" {
+		if expectedPort > uint(^uint32(0)) {
+			return options{}, errors.New("expected port is out of range")
+		}
+		mac, err := parseMACAddress(expectedMAC)
+		if err != nil {
+			return options{}, err
+		}
+		sample := learnSample{mac: mac, port: uint32(expectedPort)}
+		if err := validateLearnSample(sample); err != nil {
+			return options{}, err
+		}
+		cfg.expectedMAC = &sample
+	}
+	if cfg.verifyOnly && cfg.expectedMAC != nil {
+		return options{}, errors.New("verify-only and expect-mac are mutually exclusive")
+	}
+	if (cfg.verifyOnly || cfg.expectedMAC != nil) && !electionIDSet {
+		cfg.electionID = 1
 	}
 	return cfg, nil
 }
@@ -105,6 +139,19 @@ func runController(ctx context.Context, output io.Writer, cfg options) (runErr e
 		}
 	}()
 
+	if cfg.expectedMAC != nil {
+		if err := verifyLearnedMAC(setupCtx, c, p, *cfg.expectedMAC); err != nil {
+			return err
+		}
+		_, err = fmt.Fprintf(
+			output,
+			"learned %s on port %d verified\n",
+			cfg.expectedMAC.mac,
+			cfg.expectedMAC.port,
+		)
+		return err
+	}
+
 	if cfg.verifyOnly {
 		if err := verifyStaticState(setupCtx, c, p, false); err != nil {
 			return err
@@ -116,7 +163,33 @@ func runController(ctx context.Context, output io.Writer, cfg options) (runErr e
 	if err := c.BecomePrimary(setupCtx); err != nil {
 		return fmt.Errorf("become primary: %w", err)
 	}
-	if err := configureStaticState(setupCtx, c, p); err != nil {
+	if err := configurePipelineAndFlood(setupCtx, c, p); err != nil {
+		return err
+	}
+	if err := verifyPipelineAndFlood(setupCtx, c, p); err != nil {
+		return err
+	}
+	if err := verifyLearnedTablesEmpty(setupCtx, c, p); err != nil {
+		return err
+	}
+	learning, err := startLearningService(c, p)
+	if err != nil {
+		return fmt.Errorf("start learning service: %w", err)
+	}
+	defer func() {
+		shutdownCtx, cancel := context.WithTimeout(
+			context.Background(),
+			learningShutdownLimit,
+		)
+		defer cancel()
+		if err := learning.close(shutdownCtx); runErr == nil && err != nil {
+			runErr = fmt.Errorf("stop learning service: %w", err)
+		}
+	}()
+	if err := configureDigest(setupCtx, c, p); err != nil {
+		return err
+	}
+	if err := verifyStaticState(setupCtx, c, p, false); err != nil {
 		return err
 	}
 	if _, err := fmt.Fprintln(output, "static configuration verified"); err != nil {
@@ -126,8 +199,12 @@ func runController(ctx context.Context, output io.Writer, cfg options) (runErr e
 		return err
 	}
 	cancelSetup()
-	<-ctx.Done()
-	return nil
+	select {
+	case <-ctx.Done():
+		return nil
+	case err := <-learning.errors:
+		return fmt.Errorf("process digest: %w", err)
+	}
 }
 
 func main() {

@@ -66,7 +66,7 @@ func digestUpdate(kind client.UpdateType, entry *p4v1.DigestEntry) *p4v1.Update 
 	return &p4v1.Update{Type: kind, Entity: digestEntity(entry)}
 }
 
-func configureStaticState(
+func configurePipelineAndFlood(
 	ctx context.Context,
 	c *client.Client,
 	p *pipeline.Pipeline,
@@ -81,10 +81,7 @@ func configureStaticState(
 	if err := configureFloodGroup(ctx, c); err != nil {
 		return err
 	}
-	if err := configureDigest(ctx, c, p); err != nil {
-		return err
-	}
-	return verifyStaticState(ctx, c, p, true)
+	return nil
 }
 
 func configureFloodGroup(ctx context.Context, c *client.Client) error {
@@ -171,6 +168,23 @@ func verifyStaticState(
 	want *pipeline.Pipeline,
 	requireEmptyTables bool,
 ) error {
+	if err := verifyPipelineAndFlood(ctx, c, want); err != nil {
+		return err
+	}
+	if err := verifyDigestConfiguration(ctx, c, want); err != nil {
+		return err
+	}
+	if requireEmptyTables {
+		return verifyLearnedTablesEmpty(ctx, c, want)
+	}
+	return nil
+}
+
+func verifyPipelineAndFlood(
+	ctx context.Context,
+	c *client.Client,
+	want *pipeline.Pipeline,
+) error {
 	got, err := c.GetPipeline(ctx)
 	if err != nil {
 		return fmt.Errorf("read pipeline: %w", err)
@@ -190,7 +204,14 @@ func verifyStaticState(
 	if err := verifyFloodGroups(groups); err != nil {
 		return err
 	}
+	return nil
+}
 
+func verifyDigestConfiguration(
+	ctx context.Context,
+	c *client.Client,
+	want *pipeline.Pipeline,
+) error {
 	id, err := digestID(want)
 	if err != nil {
 		return err
@@ -202,10 +223,14 @@ func verifyStaticState(
 	if err := verifyDigestEntry(entry, desiredDigestEntry(id)); err != nil {
 		return err
 	}
+	return nil
+}
 
-	if !requireEmptyTables {
-		return nil
-	}
+func verifyLearnedTablesEmpty(
+	ctx context.Context,
+	c *client.Client,
+	want *pipeline.Pipeline,
+) error {
 	for _, name := range learnedTableNames {
 		table, ok := want.Table(name)
 		if !ok {
