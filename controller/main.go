@@ -25,12 +25,14 @@ type options struct {
 	deviceConfigPath string
 	verifyOnly       bool
 	expectedMAC      *learnSample
+	absentMAC        *macAddress
 }
 
 func parseOptions(args []string) (options, error) {
 	var cfg options
 	var expectedMAC string
 	var expectedPort uint
+	var absentMAC string
 	flags := flag.NewFlagSet("learning-controller", flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
 	flags.StringVar(&cfg.address, "address", "127.0.0.1:50052", "P4Runtime address")
@@ -51,6 +53,7 @@ func parseOptions(args []string) (options, error) {
 	flags.BoolVar(&cfg.verifyOnly, "verify-only", false, "verify static state and exit")
 	flags.StringVar(&expectedMAC, "expect-mac", "", "learned source MAC to verify")
 	flags.UintVar(&expectedPort, "expect-port", 0, "expected learned bridge port")
+	flags.StringVar(&absentMAC, "expect-absent-mac", "", "MAC that must not be learned")
 	if err := flags.Parse(args); err != nil {
 		return options{}, err
 	}
@@ -58,9 +61,19 @@ func parseOptions(args []string) (options, error) {
 		return options{}, fmt.Errorf("unexpected arguments: %v", flags.Args())
 	}
 	electionIDSet := false
+	expectedMACSet := false
+	expectedPortSet := false
+	absentMACSet := false
 	flags.Visit(func(option *flag.Flag) {
-		if option.Name == "election-id" {
+		switch option.Name {
+		case "election-id":
 			electionIDSet = true
+		case "expect-mac":
+			expectedMACSet = true
+		case "expect-port":
+			expectedPortSet = true
+		case "expect-absent-mac":
+			absentMACSet = true
 		}
 	})
 	if cfg.address == "" {
@@ -72,10 +85,10 @@ func parseOptions(args []string) (options, error) {
 	if cfg.electionID == 0 {
 		return options{}, errors.New("election ID must be non-zero")
 	}
-	if (expectedMAC == "") != (expectedPort == 0) {
+	if expectedMACSet != expectedPortSet {
 		return options{}, errors.New("expect-mac and expect-port must be used together")
 	}
-	if expectedMAC != "" {
+	if expectedMACSet {
 		if expectedPort > uint(^uint32(0)) {
 			return options{}, errors.New("expected port is out of range")
 		}
@@ -89,10 +102,27 @@ func parseOptions(args []string) (options, error) {
 		}
 		cfg.expectedMAC = &sample
 	}
-	if cfg.verifyOnly && cfg.expectedMAC != nil {
-		return options{}, errors.New("verify-only and expect-mac are mutually exclusive")
+	if absentMACSet {
+		mac, err := parseEthernetMAC(absentMAC)
+		if err != nil {
+			return options{}, err
+		}
+		cfg.absentMAC = &mac
 	}
-	if (cfg.verifyOnly || cfg.expectedMAC != nil) && !electionIDSet {
+	readbackModes := 0
+	if cfg.verifyOnly {
+		readbackModes++
+	}
+	if cfg.expectedMAC != nil {
+		readbackModes++
+	}
+	if cfg.absentMAC != nil {
+		readbackModes++
+	}
+	if readbackModes > 1 {
+		return options{}, errors.New("readback modes are mutually exclusive")
+	}
+	if readbackModes == 1 && !electionIDSet {
 		cfg.electionID = 1
 	}
 	return cfg, nil
@@ -151,9 +181,16 @@ func runController(ctx context.Context, output io.Writer, cfg options) (runErr e
 		)
 		return err
 	}
+	if cfg.absentMAC != nil {
+		if err := verifyMACAbsent(setupCtx, c, p, *cfg.absentMAC); err != nil {
+			return err
+		}
+		_, err = fmt.Fprintf(output, "MAC %s is absent\n", cfg.absentMAC.String())
+		return err
+	}
 
 	if cfg.verifyOnly {
-		if err := verifyStaticState(setupCtx, c, p, false); err != nil {
+		if err := verifyStaticState(setupCtx, c, p, true); err != nil {
 			return err
 		}
 		_, err = fmt.Fprintln(output, "static configuration verified")

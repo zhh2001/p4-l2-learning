@@ -32,15 +32,23 @@ type learnSample struct {
 }
 
 func parseMACAddress(value string) (macAddress, error) {
+	mac, err := parseEthernetMAC(value)
+	if err != nil {
+		return macAddress{}, err
+	}
+	if err := validateLearnSample(learnSample{mac: mac, port: 1}); err != nil {
+		return macAddress{}, err
+	}
+	return mac, nil
+}
+
+func parseEthernetMAC(value string) (macAddress, error) {
 	parsed, err := net.ParseMAC(value)
 	if err != nil || len(parsed) != len(macAddress{}) {
 		return macAddress{}, fmt.Errorf("invalid MAC address %q", value)
 	}
 	var mac macAddress
 	copy(mac[:], parsed)
-	if err := validateLearnSample(learnSample{mac: mac, port: 1}); err != nil {
-		return macAddress{}, err
-	}
 	return mac, nil
 }
 
@@ -331,6 +339,27 @@ func verifyLearnedMAC(
 			"MAC %s: expected source and destination port %d, got source ports %v and destination ports %v",
 			want.mac,
 			want.port,
+			state.sourcePorts,
+			state.destinationPorts,
+		)
+	}
+	return nil
+}
+
+func verifyMACAbsent(
+	ctx context.Context,
+	reader tableReader,
+	p *pipeline.Pipeline,
+	mac macAddress,
+) error {
+	state, err := readLearnedMACState(ctx, reader, p, mac)
+	if err != nil {
+		return err
+	}
+	if len(state.sourcePorts) != 0 || len(state.destinationPorts) != 0 {
+		return fmt.Errorf(
+			"MAC %s: expected no learned state, got source ports %v and destination ports %v",
+			mac,
 			state.sourcePorts,
 			state.destinationPorts,
 		)

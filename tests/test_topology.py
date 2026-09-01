@@ -130,6 +130,26 @@ class BMv2LifecycleTest(unittest.TestCase):
         self.assertEqual(process.wait.call_count, 2)
         self.assertIsNone(switch.process)
 
+    def test_stop_retains_process_handle_if_kill_does_not_reap(self):
+        process = mock.Mock()
+        process.poll.return_value = None
+        process.wait.side_effect = [
+            subprocess.TimeoutExpired("bmv2", 2),
+            subprocess.TimeoutExpired("bmv2", 2),
+        ]
+        switch = mock.Mock(
+            process=process,
+            log_file=None,
+            spec=TOPOLOGY.P4RuntimeSwitch,
+        )
+
+        with self.assertRaises(subprocess.TimeoutExpired):
+            TOPOLOGY.P4RuntimeSwitch._stop_process(switch)
+
+        self.assertIs(switch.process, process)
+        process.terminate.assert_called_once_with()
+        process.kill.assert_called_once_with()
+
     def test_stop_closes_the_log_if_the_process_disappears(self):
         process = mock.Mock()
         process.poll.return_value = None
@@ -145,6 +165,30 @@ class BMv2LifecycleTest(unittest.TestCase):
 
         log_file.close.assert_called_once_with()
         self.assertIsNone(switch.log_file)
+
+    def test_stop_deletes_interfaces_after_process_cleanup_failure(self):
+        switch = object.__new__(TOPOLOGY.P4RuntimeSwitch)
+        with mock.patch.object(
+            TOPOLOGY.P4RuntimeSwitch,
+            "_stop_process",
+            side_effect=RuntimeError("stop failed"),
+        ), mock.patch.object(TOPOLOGY.Switch, "stop") as base_stop:
+            with self.assertRaisesRegex(RuntimeError, "stop failed"):
+                TOPOLOGY.P4RuntimeSwitch.stop(switch, deleteIntfs=True)
+
+        base_stop.assert_called_once_with(True)
+
+    def test_terminate_cleans_node_after_process_cleanup_failure(self):
+        switch = object.__new__(TOPOLOGY.P4RuntimeSwitch)
+        with mock.patch.object(
+            TOPOLOGY.P4RuntimeSwitch,
+            "_stop_process",
+            side_effect=RuntimeError("stop failed"),
+        ), mock.patch.object(TOPOLOGY.Switch, "terminate") as base_terminate:
+            with self.assertRaisesRegex(RuntimeError, "stop failed"):
+                TOPOLOGY.P4RuntimeSwitch.terminate(switch)
+
+        base_terminate.assert_called_once_with()
 
 
 if __name__ == "__main__":

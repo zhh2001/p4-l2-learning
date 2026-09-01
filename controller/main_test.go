@@ -63,13 +63,45 @@ func TestParseOptionsReadOnlyElectionID(t *testing.T) {
 	}
 }
 
+func TestParseOptionsAbsentMAC(t *testing.T) {
+	for _, value := range []string{
+		"00:00:00:00:00:00",
+		"01:00:5e:00:00:01",
+	} {
+		cfg, err := parseOptions([]string{"--expect-absent-mac", value})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if cfg.absentMAC == nil || cfg.absentMAC.String() != value {
+			t.Fatalf("unexpected absent-MAC expectation: %v", cfg.absentMAC)
+		}
+		if cfg.electionID != 1 {
+			t.Fatalf("readback election ID = %d, want 1", cfg.electionID)
+		}
+	}
+}
+
 func TestParseOptionsRejectsInvalidExpectedMAC(t *testing.T) {
 	tests := [][]string{
 		{"--expect-mac", "00:00:00:00:00:01"},
 		{"--expect-port", "1"},
+		{"--expect-port", "0"},
+		{"--expect-mac", "", "--expect-port", "1"},
 		{"--expect-mac", "01:00:00:00:00:01", "--expect-port", "1"},
 		{"--expect-mac", "00:00:00:00:00:01", "--expect-port", "5"},
 		{"--verify-only", "--expect-mac", "00:00:00:00:00:01", "--expect-port", "1"},
+		{"--expect-absent-mac", "not-a-mac"},
+		{"--expect-absent-mac", ""},
+		{"--verify-only", "--expect-absent-mac", "00:00:00:00:00:01"},
+		{"--verify-only", "--expect-port", "0"},
+		{
+			"--expect-absent-mac", "01:00:5e:00:00:01",
+			"--expect-port", "0",
+		},
+		{
+			"--expect-mac", "00:00:00:00:00:01", "--expect-port", "1",
+			"--expect-absent-mac", "00:00:00:00:00:02",
+		},
 	}
 	for _, args := range tests {
 		if _, err := parseOptions(args); err == nil {

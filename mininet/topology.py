@@ -129,22 +129,26 @@ class P4RuntimeSwitch(Switch):
 
     def _stop_process(self):
         process = self.process
-        self.process = None
+        reaped = process is None
         try:
-            if process is not None and process.poll() is None:
-                try:
-                    process.terminate()
-                except ProcessLookupError:
-                    pass
-                try:
-                    process.wait(timeout=2)
-                except subprocess.TimeoutExpired:
+            if process is not None:
+                if process.poll() is None:
                     try:
-                        process.kill()
+                        process.terminate()
                     except ProcessLookupError:
                         pass
-                    process.wait(timeout=2)
+                    try:
+                        process.wait(timeout=2)
+                    except subprocess.TimeoutExpired:
+                        try:
+                            process.kill()
+                        except ProcessLookupError:
+                            pass
+                        process.wait(timeout=2)
+                reaped = True
         finally:
+            if reaped or process.poll() is not None:
+                self.process = None
             if self.log_file is not None:
                 self.log_file.close()
                 self.log_file = None
@@ -192,12 +196,38 @@ class P4RuntimeSwitch(Switch):
             )
 
     def stop(self, deleteIntfs=True):
-        self._stop_process()
-        super().stop(deleteIntfs)
+        process_error = None
+        try:
+            self._stop_process()
+        except Exception as error:
+            process_error = error
+        try:
+            super().stop(deleteIntfs)
+        except Exception as cleanup_error:
+            if process_error is not None:
+                raise RuntimeError(
+                    f"stop BMv2: {process_error}; delete interfaces: {cleanup_error}"
+                ) from process_error
+            raise
+        if process_error is not None:
+            raise process_error
 
     def terminate(self):
-        self._stop_process()
-        super().terminate()
+        process_error = None
+        try:
+            self._stop_process()
+        except Exception as error:
+            process_error = error
+        try:
+            super().terminate()
+        except Exception as cleanup_error:
+            if process_error is not None:
+                raise RuntimeError(
+                    f"stop BMv2: {process_error}; terminate node: {cleanup_error}"
+                ) from process_error
+            raise
+        if process_error is not None:
+            raise process_error
 
 
 class LearningSwitchTopo(Topo):
@@ -208,7 +238,11 @@ class LearningSwitchTopo(Topo):
             self.addLink(host, switch, port1=0, port2=SWITCH_PORTS[host])
 
 
-def create_network(runtime_dir, switch_binary="simple_switch_grpc"):
+def create_network(
+    runtime_dir,
+    switch_binary="simple_switch_grpc",
+    build=True,
+):
     switch = partial(
         P4RuntimeSwitch,
         runtime_dir=runtime_dir,
@@ -221,4 +255,5 @@ def create_network(runtime_dir, switch_binary="simple_switch_grpc"):
         controller=None,
         autoSetMacs=False,
         autoStaticArp=False,
+        build=build,
     )

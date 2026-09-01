@@ -333,6 +333,37 @@ func TestVerifyLearnedMACRejectsStaleSource(t *testing.T) {
 	}
 }
 
+func TestVerifyMACAbsent(t *testing.T) {
+	p := newLearningTestPipeline(t)
+	absent := mustRawMAC(0x01, 0, 0x5e, 0, 0, 1)
+	tables := newMemoryTableClient()
+	if err := verifyMACAbsent(context.Background(), tables, p, absent); err != nil {
+		t.Fatal(err)
+	}
+
+	present := mustTestMAC(t, "00:00:00:00:00:01")
+	destination, err := destinationEntry(p, learnSample{mac: present, port: 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tables.add(destination)
+	if err := verifyMACAbsent(context.Background(), tables, p, present); err == nil ||
+		!strings.Contains(err.Error(), "destination ports [2]") {
+		t.Fatalf("present MAC absence result = %v", err)
+	}
+
+	tables = newMemoryTableClient()
+	source, err := sourceLocationEntry(p, learnSample{mac: present, port: 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tables.add(source)
+	if err := verifyMACAbsent(context.Background(), tables, p, present); err == nil ||
+		!strings.Contains(err.Error(), "source ports [2]") {
+		t.Fatalf("present MAC absence result = %v", err)
+	}
+}
+
 type recordedTableOperation struct {
 	kind  client.UpdateType
 	entry *p4v1.TableEntry
