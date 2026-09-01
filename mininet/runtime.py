@@ -74,6 +74,7 @@ class LearningSwitchRuntime:
         self.runtime_dir = Path(self._temporary.name)
         self.network = None
         self.controller = None
+        self.controller_was_ready = False
         self.controller_log = None
         self.processes = []
         self.node_processes = []
@@ -175,6 +176,7 @@ class LearningSwitchRuntime:
             )
         if "controller ready" not in self._log_tail():
             raise RuntimeError("controller exited before readiness")
+        self.controller_was_ready = True
 
     def query(self, *arguments, timeout=5.0):
         return subprocess.run(
@@ -264,6 +266,15 @@ class LearningSwitchRuntime:
                 self.controller.wait(timeout=2)
         else:
             self.controller.wait()
+        if self.controller_was_ready and not was_running:
+            detail = self._log_tail()
+            message = (
+                "controller exited unexpectedly with status "
+                f"{self.controller.returncode}"
+            )
+            if detail:
+                message += f"; log tail:\n{detail}"
+            raise RuntimeError(message)
         if was_running and self.controller.returncode != 0:
             raise RuntimeError(
                 f"controller stopped with status {self.controller.returncode}"
